@@ -167,7 +167,7 @@ func ParseEnvironment(c *Config) error {
 		if env != "" {
 			c.LoadBalancerClassName = env
 		}
-		
+
 		// Find the namespace that the control plane should use (for leaderElection lock)
 		env = os.Getenv(svcNamespace)
 		if env != "" {

@@ -8,7 +8,6 @@ import (
 
 // Config defines all of the settings for the Kube-Vip Pod
 type Config struct {
-
 	// Logging, settings
 	Logging int `yaml:"logging"`
 
@@ -38,7 +37,7 @@ type Config struct {
 
 	// LoadBalancerClassName, will limit the load balancing services to services with LoadBalancerClass set to this value
 	LoadBalancerClassName string `yaml:"lbClassName"`
-	
+
 	// ArpBroadcastRate, defines how often kube-vip will update the network about updates to the network
 	ArpBroadcastRate int64 `yaml:"arpBroadcastRate"`
 
@@ -139,7 +138,6 @@ type Config struct {
 
 // LeaderElection defines all of the settings for Kubernetes LeaderElection
 type LeaderElection struct {
-
 	// EnableLeaderElection will use the Kubernetes leader election algorithm
 	EnableLeaderElection bool `yaml:"enableLeaderElection"`
 
@@ -167,10 +165,10 @@ type LoadBalancer struct {
 	// BindToVip will bind the load balancer port to the VIP itself
 	BindToVip bool `yaml:"bindToVip"`
 
-	//BackendPort, is a port that all backends are listening on (To be used to simplify building a list of backends)
+	// BackendPort, is a port that all backends are listening on (To be used to simplify building a list of backends)
 	BackendPort int `yaml:"backendPort"`
 
-	//Backends, is an array of backend servers
+	// Backends, is an array of backend servers
 	Backends []BackEnd `yaml:"backends"`
 
 	// Forwarding method of LoadBalancer, either Local, Tunnel, DirectRoute or Bypass

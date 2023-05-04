@@ -114,10 +114,7 @@ func (configurator *network) AddRoute() error {
 		LinkIndex: configurator.link.Attrs().Index,
 		Table:     configurator.routeTable,
 	}
-	if err := netlink.RouteAdd(route); err != nil {
-		return err
-	}
-	return nil
+	return netlink.RouteAdd(route)
 }
 
 // AddRoute - Add an IP address to a route table
@@ -128,10 +125,7 @@ func (configurator *network) DeleteRoute() error {
 		LinkIndex: configurator.link.Attrs().Index,
 		Table:     configurator.routeTable,
 	}
-	if err := netlink.RouteDel(route); err != nil {
-		return err
-	}
-	return nil
+	return netlink.RouteDel(route)
 }
 
 // AddIP - Add an IP address to the interface
