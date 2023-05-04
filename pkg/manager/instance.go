@@ -8,7 +8,6 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv4/nclient4"
 	"github.com/kube-vip/kube-vip/pkg/cluster"
 	"github.com/kube-vip/kube-vip/pkg/kubevip"
-	"github.com/kube-vip/kube-vip/pkg/service"
 	"github.com/kube-vip/kube-vip/pkg/vip"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
@@ -42,7 +41,7 @@ type Instance struct {
 }
 
 func NewInstance(svc *v1.Service, config *kubevip.Config) (*Instance, error) {
-	instanceAddress := service.FetchServiceAddress(svc)
+	instanceAddress := fetchServiceAddress(svc)
 	instanceUID := string(svc.UID)
 
 	// Detect if we're using a specific interface for services
@@ -55,7 +54,7 @@ func NewInstance(svc *v1.Service, config *kubevip.Config) (*Instance, error) {
 
 	// Generate new Virtual IP configuration
 	newVip := &kubevip.Config{
-		VIP:                instanceAddress, //TODO support more than one vip?
+		VIP:                instanceAddress, // TODO support more than one vip?
 		Interface:          serviceInterface,
 		SingleNode:         true,
 		EnableARP:          config.EnableARP,

@@ -7,7 +7,6 @@ import (
 	"sync"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/kube-vip/kube-vip/pkg/service"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
@@ -102,7 +101,7 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 			}
 
 			// We only care about LoadBalancer services that have been allocated an address
-			if service.FetchServiceAddress(svc) == "" {
+			if fetchServiceAddress(svc) == "" {
 				break
 			}
 
@@ -125,7 +124,7 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 				break
 			}
 
-			log.Debugf("service [%s] has been added/modified with addresses [%s] and is active [%t]", svc.Name, service.FetchServiceAddress(svc), activeService[string(svc.UID)])
+			log.Debugf("service [%s] has been added/modified with addresses [%s] and is active [%t]", svc.Name, fetchServiceAddress(svc), activeService[string(svc.UID)])
 
 			// Scenarios:
 			// 1.
@@ -213,7 +212,6 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 			statusErr, ok := errObject.(*apierrors.StatusError)
 			if !ok {
 				log.Errorf(spew.Sprintf("Received an error which is not *metav1.Status but %#+v", event.Object))
-
 			}
 
 			status := statusErr.ErrStatus
