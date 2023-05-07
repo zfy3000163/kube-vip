@@ -400,6 +400,15 @@ func ParseEnvironment(c *Config) error {
 		c.LoadBalancerForwardingMethod = env
 	}
 
+	env = os.Getenv(EnableServiceSecurity)
+	if env != "" {
+		b, err := strconv.ParseBool(env)
+		if err != nil {
+			return err
+		}
+		c.EnableServiceSecurity = b
+	}
+
 	// Find Prometheus configuration
 	env = os.Getenv(prometheusServer)
 	if env != "" {
