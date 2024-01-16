@@ -2,7 +2,6 @@ package manager
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -188,10 +187,11 @@ func parseBgpAnnotations(node *v1.Node, prefix string) (bgp.Config, bgp.Peer, er
 		if ipAddr != "" {
 			bgpPeer.Address = ipAddr
 			// Check if we're also expecting a password for this peer
-			base64BGPPassword := node.Annotations[fmt.Sprintf("%s/bgp-pass", prefix)]
-			if base64BGPPassword != "" {
+			bgp_pass := node.Annotations[fmt.Sprintf("%s/bgp-pass", prefix)]
+			if bgp_pass != "" {
 				// Decode base64 encoded string
-				decodedPassword, err := base64.StdEncoding.DecodeString(base64BGPPassword)
+				//decodedPassword, err := base64.StdEncoding.DecodeString(base64BGPPassword)
+				decodedPassword := bgp_pass
 				if err != nil {
 					return bgpConfig, bgpPeer, err
 				}

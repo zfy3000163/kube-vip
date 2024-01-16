@@ -1,3 +1,4 @@
+
 package manager
 
 import (
@@ -39,6 +40,8 @@ func (sm *Manager) startARP() error {
 		close(sm.shutdownChan)
 		// Cancel the context, which will in turn cancel the leadership
 		cancel()
+
+		log.Fatal("Received kube-vip termination, signaling shutdown")
 	}()
 
 	if sm.config.EnableControlPlane {
@@ -53,12 +56,16 @@ func (sm *Manager) startARP() error {
 		}
 
 		go func() {
-			err := cpCluster.StartCluster(sm.config, clusterManager, nil)
-			if err != nil {
-				log.Errorf("Control Plane Error [%v]", err)
-				// Trigger the shutdown of this manager instance
-				sm.signalChan <- syscall.SIGINT
+			for i := 0; ; i++ {
+				err := cpCluster.StartCluster(sm.config, clusterManager, nil)
+				if err != nil {
+					log.Errorf("Control Plane Error [%v]", err)
+					// Trigger the shutdown of this manager instance
+					sm.signalChan <- syscall.SIGINT
 
+				}
+				log.Debugf("cluster loop :%d\n", i)
+				time.Sleep(1 * time.Second)
 			}
 		}()
 
@@ -129,15 +136,16 @@ func (sm *Manager) startARP() error {
 		// and fewer objects in the cluster watch "all Leases".
 		lock := &resourcelock.LeaseLock{
 			LeaseMeta: metav1.ObjectMeta{
-				Name:      plunderLock,
-				Namespace: ns,
+				Name:        plunderLock,
+				Namespace:   ns,
+				Annotations: map[string]string{"network.io/domain": "kube-vip"},
 			},
 			Client: sm.clientSet.CoordinationV1(),
 			LockConfig: resourcelock.ResourceLockConfig{
 				Identity: id,
 			},
 		}
-
+		var isLeader bool = false
 		// start the leader election code loop
 		leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
 			Lock: lock,
@@ -170,10 +178,25 @@ func (sm *Manager) startARP() error {
 				OnNewLeader: func(identity string) {
 					// we're notified when new leader elected
 					if identity == id {
+						log.Infof("self 2 svc [%s] is assuming leadership of the cluster", identity)
+						isLeader = true
 						// I just got the lock
 						return
 					}
 					log.Infof("new leader elected: %s", identity)
+					isLeader = false
+
+					go func() {
+						for index := 0; index < 5; index++ {
+							if isLeader {
+								break
+							}
+							if sm.clearnServiceLbIp(nil) {
+								break
+							}
+							time.Sleep(10 * time.Second)
+						}
+					}()
 				},
 			},
 		})

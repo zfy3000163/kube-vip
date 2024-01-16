@@ -1,3 +1,4 @@
+
 package manager
 
 import (
@@ -45,8 +46,9 @@ func (sm *Manager) StartServicesLeaderElection(ctx context.Context, service *v1.
 	// and fewer objects in the cluster watch "all Leases".
 	lock := &resourcelock.LeaseLock{
 		LeaseMeta: metav1.ObjectMeta{
-			Name:      serviceLease,
-			Namespace: service.Namespace,
+			Name:        serviceLease,
+			Namespace:   service.Namespace,
+			Annotations: map[string]string{"network.io/domain": "kube-vip"},
 		},
 		Client: sm.clientSet.CoordinationV1(),
 		LockConfig: resourcelock.ResourceLockConfig{
@@ -55,8 +57,10 @@ func (sm *Manager) StartServicesLeaderElection(ctx context.Context, service *v1.
 	}
 
 	activeService[string(service.UID)] = true
+	leaderService[string(service.UID)] = false
+	leaderCtx, leaderCancel := context.WithCancel(ctx)
 	// start the leader election code loop
-	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+	leaderelection.RunOrDie(leaderCtx, leaderelection.LeaderElectionConfig{
 		Lock: lock,
 		// IMPORTANT: you MUST ensure that any code you have that
 		// is protected by the lease must terminate **before**
@@ -69,13 +73,14 @@ func (sm *Manager) StartServicesLeaderElection(ctx context.Context, service *v1.
 		RenewDeadline:   time.Duration(sm.config.RenewDeadline) * time.Second,
 		RetryPeriod:     time.Duration(sm.config.RetryPeriod) * time.Second,
 		Callbacks: leaderelection.LeaderCallbacks{
-			OnStartedLeading: func(ctx context.Context) {
+			OnStartedLeading: func(leaderCtx context.Context) {
 				// Mark this service as active (as we've started leading)
 				// we run this in background as it's blocking
 				wg.Add(1)
 				go func() {
-					if err := sm.syncServices(ctx, service, wg); err != nil {
-						log.Errorln(err)
+					if err := sm.syncServices(leaderCtx, service, wg); err != nil {
+						activeService[string(service.UID)] = false
+						leaderCancel()
 					}
 				}()
 
@@ -94,10 +99,25 @@ func (sm *Manager) StartServicesLeaderElection(ctx context.Context, service *v1.
 			OnNewLeader: func(identity string) {
 				// we're notified when new leader elected
 				if identity == id {
+					log.Infof("self 2 svc [%s] on host [%s] is assuming leadership of the cluster", service.Name, identity)
 					// I just got the lock
+					leaderService[string(service.UID)] = true
 					return
 				}
-				log.Infof("[services election] new leader elected: %s", identity)
+				log.Infof("[services election] svc [%s] new leader elected: %s", service.Name, identity)
+				leaderService[string(service.UID)] = false
+				go func() {
+					for index := 0; index < 5; index++ {
+						if leaderService[string(service.UID)] {
+							break
+						}
+						if sm.clearnServiceLbIp(service) {
+							break
+						}
+						time.Sleep(10 * time.Second)
+					}
+				}()
+
 			},
 		},
 	})

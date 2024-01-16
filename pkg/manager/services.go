@@ -1,13 +1,17 @@
+
 package manager
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/kube-vip/kube-vip/pkg/cluster"
+	"github.com/kube-vip/kube-vip/pkg/kubevip"
 	"github.com/kube-vip/kube-vip/pkg/vip"
 	log "github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
@@ -82,7 +86,7 @@ func (sm *Manager) addService(service *v1.Service) error {
 
 	if err := sm.updateStatus(newService); err != nil {
 		// delete service to collect garbage
-		if deleteErr := sm.deleteService(newService.UID); err != nil {
+		if deleteErr := sm.deleteService(newService.UID); deleteErr != nil {
 			return deleteErr
 		}
 		return err
@@ -250,6 +254,163 @@ func (sm *Manager) updateStatus(i *Instance) error {
 	if retryErr != nil {
 		log.Errorf("Failed to set Services: %v", retryErr)
 		return retryErr
+	}
+	return nil
+}
+
+func (sm *Manager) clearnServiceLbIp(service *v1.Service) bool {
+	var isSuc bool
+
+	if service == nil && !sm.config.EnableServicesElection {
+		svcs, err := sm.clientSet.CoreV1().Services(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
+		if err != nil {
+			log.Errorf("Error list Service Status: %v", err)
+			return false
+		}
+
+		isSuc = false
+		for x := range svcs.Items {
+			if lbip := svcs.Items[x].Spec.LoadBalancerIP; lbip != "" {
+				if cleanLbIp(lbip, sm.config) {
+					isSuc = true
+					sm.deleteService(string(svcs.Items[x].UID))
+				}
+				/*
+					for y := range sm.serviceInstances {
+						if sm.serviceInstances[y].UID == string(svcs.Items[x].UID) {
+							log.Info("cleanLbIp and remove the instance...")
+							sm.serviceInstances = append(sm.serviceInstances[:y], sm.serviceInstances[(y+1):]...)
+							break
+						}
+					}
+				*/
+			}
+		}
+	} else if sm.config.EnableServicesElection {
+		svc := service
+		isSuc = false
+		if lbip := svc.Spec.LoadBalancerIP; lbip != "" {
+			if cleanLbIp(lbip, sm.config) {
+				isSuc = true
+				sm.deleteService(string(svc.UID))
+			}
+			/*
+				for y := range sm.serviceInstances {
+					if sm.serviceInstances[y].UID == string(svc.UID) {
+						log.Info("cleanLbIp and remove the instance...")
+						sm.serviceInstances = append(sm.serviceInstances[:y], sm.serviceInstances[(y+1):]...)
+						break
+					}
+				}
+			*/
+		}
+
+	}
+
+	return isSuc
+}
+
+func cleanLbIp(newServiceAddress string, config *kubevip.Config) bool {
+	log.Info("[STARTING] cleanLbIp ")
+
+	var serviceInterface string
+	if config.ServicesInterface != "" {
+		serviceInterface = config.ServicesInterface
+	} else {
+		serviceInterface = config.Interface
+	}
+	// Generate new Virtual IP configuration
+	newVip := &kubevip.Config{
+		VIP:        newServiceAddress, //TODO support more than one vip?
+		Interface:  serviceInterface,
+		SingleNode: true,
+		EnableARP:  config.EnableARP,
+		EnableBGP:  config.EnableBGP,
+		VIPCIDR:    config.VIPCIDR,
+	}
+
+	var newService Instance
+	newService.vipConfig = newVip
+
+	// TODO - start VIP
+	cluster, err := cluster.InitCluster(newService.vipConfig, false)
+	if err != nil {
+		log.Errorf("Failed to add Service Vip [%s]", newService.Vip)
+		return false
+	}
+
+	set, err := cluster.Network.IsSet()
+	if err != nil {
+		log.Warnf("%v", err)
+	}
+	log.Infof("cluster arp vip: %s, select default, set: %t", newServiceAddress, set)
+	if set {
+		log.Infof("already applying the VIP configuration [%s] to the interface [%s]", newServiceAddress, newService.vipConfig.Interface)
+		err = cluster.Network.DeleteIP()
+		if err != nil {
+			log.Errorf("%v", err)
+		}
+	} else {
+		log.Infof("the VIP configuration [%s] to the interface [%s] is not Found", newServiceAddress, newService.vipConfig.Interface)
+		return false
+	}
+
+	log.Info("[COMPLETE] cleanLbIp")
+
+	return true
+}
+
+func (sm *Manager) updateServiceIgnoreAnnotationAndLabels(isIgnoreSvc bool, service *v1.Service) error {
+	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Retrieve the latest version of Deployment before attempting update
+		// RetryOnConflict uses exponential backoff to avoid exhausting the apiserver
+		currentService, err := sm.clientSet.CoreV1().Services(service.Namespace).Get(context.TODO(), service.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		currentServiceCopy := currentService.DeepCopy()
+		if currentServiceCopy.Annotations == nil {
+			currentServiceCopy.Annotations = make(map[string]string)
+		}
+		currentServiceCopy.Annotations["kube-vip.io/ignore"] = strconv.FormatBool(isIgnoreSvc)
+
+		if currentServiceCopy.Labels == nil {
+			// Just because ..
+			currentServiceCopy.Labels = make(map[string]string)
+		}
+		// Set Label for service lookups
+		currentServiceCopy.Labels["implementation"] = "kube-vip"
+		currentServiceCopy.Labels["ipam-address"] = service.Spec.LoadBalancerIP
+
+		_, err = sm.clientSet.CoreV1().Services(currentService.Namespace).Update(context.TODO(), currentServiceCopy, metav1.UpdateOptions{})
+		if err != nil {
+			log.Errorf("Error updating Service Spec [%s] : %v", currentServiceCopy.Name, err)
+			return err
+		}
+		return nil
+	})
+
+	if retryErr != nil {
+		log.Errorf("Failed to set Services: %v", retryErr)
+		return retryErr
+	}
+	return nil
+}
+
+/* return value: sucess: svc, fail: nil*/
+func (sm *Manager) checkDupLbIP(checkIP string, serviceId string) *v1.Service {
+	svcs, err := sm.clientSet.CoreV1().Services(v1.NamespaceAll).List(context.TODO(), metav1.ListOptions{})
+	if err != nil {
+		log.Errorf("Error list Service Status: %v", err)
+	}
+
+	for x := range svcs.Items {
+		if string(svcs.Items[x].UID) != serviceId {
+			if lbip := svcs.Items[x].Spec.LoadBalancerIP; lbip != "" && lbip == checkIP {
+				return &svcs.Items[x]
+			}
+		}
 	}
 	return nil
 }

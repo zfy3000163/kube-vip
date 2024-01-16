@@ -1,3 +1,4 @@
+
 package manager
 
 import (
@@ -31,12 +32,16 @@ var activeService map[string]bool
 // watchedService keeps track of services that are already being watched
 var watchedService map[string]bool
 
+// leaderService keeps track of services that are already being leader
+var leaderService map[string]bool
+
 func init() {
 	// Set up the caches for monitoring existing active or watched services
 	activeServiceLoadBalancerCancel = make(map[string]func())
 	activeServiceLoadBalancer = make(map[string]context.Context)
 	activeService = make(map[string]bool)
 	watchedService = make(map[string]bool)
+	leaderService = make(map[string]bool)
 }
 
 // This function handles the watching of a services endpoints and updates a load balancers endpoint configurations accordingly
@@ -89,7 +94,7 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 		// We need to inspect the event and get ResourceVersion out of it
 		switch event.Type {
 		case watch.Added, watch.Modified:
-			// log.Debugf("Endpoints for service [%s] have been Created or modified", s.service.ServiceName)
+
 			svc, ok := event.Object.(*v1.Service)
 			if !ok {
 				return fmt.Errorf("unable to parse Kubernetes services from API watcher")
@@ -97,11 +102,81 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 
 			// We only care about LoadBalancer services
 			if svc.Spec.Type != v1.ServiceTypeLoadBalancer {
+				if activeService[string(svc.UID)] {
+					log.Infof("watch svc name: %s, type:%s, lbip:%s\n", svc.Name, svc.Spec.Type, svc.Spec.LoadBalancerIP)
+					// We can ignore this service
+					if svc.Annotations["kube-vip.io/ignore"] == "true" {
+						log.Infof("service [%s] has an ignore annotation for kube-vip", svc.Name)
+						break
+					}
+
+					var svc_ret *v1.Service = nil
+					var oldLbIp string
+					for x := range sm.serviceInstances {
+						log.Debugf("watch Looking for [%s], found [%s]", svc.UID, sm.serviceInstances[x].UID)
+
+						if sm.serviceInstances[x].UID == string(svc.UID) {
+							oldLbIp = sm.serviceInstances[x].Vip
+						}
+					}
+					if oldLbIp != "" {
+						svc_ret = sm.checkDupLbIP(oldLbIp, string(svc.UID))
+					}
+
+					if svc_ret != nil {
+						log.Infof("service [%s/%s] has been modified Annotations[kube-vip.io/ignore]: false", svc_ret.Namespace, svc_ret.Name)
+						sm.updateServiceIgnoreAnnotationAndLabels(false, svc_ret)
+					}
+
+					err := sm.deleteService(string(svc.UID))
+					if err != nil {
+						log.Error(err)
+					}
+					// Calls the cancel function of the context
+					activeServiceLoadBalancerCancel[string(svc.UID)]()
+					activeService[string(svc.UID)] = false
+					watchedService[string(svc.UID)] = false
+				}
 				break
 			}
 
 			// We only care about LoadBalancer services that have been allocated an address
 			if svc.Spec.LoadBalancerIP == "" {
+				if activeService[string(svc.UID)] {
+					log.Infof("watch svc name: %s, type:%s, lbip:%s\n", svc.Name, svc.Spec.Type, svc.Spec.LoadBalancerIP)
+					// We can ignore this service
+					if svc.Annotations["kube-vip.io/ignore"] == "true" {
+						log.Infof("service [%s] has an ignore annotation for kube-vip", svc.Name)
+						break
+					}
+
+					var svc_ret *v1.Service = nil
+					var oldLbIp string
+					for x := range sm.serviceInstances {
+						log.Debugf("watch Looking for [%s], found [%s]", svc.UID, sm.serviceInstances[x].UID)
+
+						if sm.serviceInstances[x].UID == string(svc.UID) {
+							oldLbIp = sm.serviceInstances[x].Vip
+						}
+					}
+					if oldLbIp != "" {
+						svc_ret = sm.checkDupLbIP(oldLbIp, string(svc.UID))
+					}
+
+					if svc_ret != nil {
+						log.Infof("service [%s/%s] has been modified Annotations[kube-vip.io/ignore]: false", svc_ret.Namespace, svc_ret.Name)
+						sm.updateServiceIgnoreAnnotationAndLabels(false, svc_ret)
+					}
+
+					err := sm.deleteService(string(svc.UID))
+					if err != nil {
+						log.Error(err)
+					}
+					// Calls the cancel function of the context
+					activeServiceLoadBalancerCancel[string(svc.UID)]()
+					activeService[string(svc.UID)] = false
+					watchedService[string(svc.UID)] = false
+				}
 				break
 			}
 
@@ -121,6 +196,33 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 			// Check if we ignore this service
 			if svc.Annotations["kube-vip.io/ignore"] == "true" {
 				log.Infof("service [%s] has an ignore annotation for kube-vip", svc.Name)
+				break
+			}
+
+			changeLbIP := false
+			newServiceAddress := svc.Spec.LoadBalancerIP
+			newServiceUID := string(svc.UID)
+			for x := range sm.serviceInstances {
+				if sm.serviceInstances[x].UID == newServiceUID {
+					// If the found instance's DHCP configuration doesn't match the new service, delete it.
+					if len(svc.Status.LoadBalancer.Ingress) > 0 &&
+						newServiceAddress != svc.Status.LoadBalancer.Ingress[0].IP {
+						changeLbIP = true
+						break
+					}
+				}
+			}
+			if changeLbIP {
+				log.Debugf("delete newServiceAddress: %s", newServiceAddress)
+				err := sm.deleteService(string(svc.UID))
+				if err != nil {
+					log.Error(err)
+				}
+				log.Debugf("cancel newServiceAddress: %s", newServiceAddress)
+				// Calls the cancel function of the context
+				activeServiceLoadBalancerCancel[string(svc.UID)]()
+				activeService[string(svc.UID)] = false
+				watchedService[string(svc.UID)] = false
 				break
 			}
 
@@ -167,6 +269,8 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 					wg.Add(1)
 					err = serviceFunc(activeServiceLoadBalancer[string(svc.UID)], svc, &wg)
 					if err != nil {
+						activeService[string(svc.UID)] = false
+						watchedService[string(svc.UID)] = false
 						log.Error(err)
 					}
 					wg.Done()
@@ -190,6 +294,12 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 					log.Infof("service [%s] has an ignore annotation for kube-vip", svc.Name)
 					break
 				}
+
+				var svc_ret *v1.Service = nil
+				if svc.Spec.LoadBalancerIP != "" {
+					svc_ret = sm.checkDupLbIP(svc.Spec.LoadBalancerIP, string(svc.UID))
+				}
+
 				// If this is an active service then and additional leaderElection will handle stopping
 				err := sm.deleteService(string(svc.UID))
 				if err != nil {
@@ -199,6 +309,11 @@ func (sm *Manager) servicesWatcher(ctx context.Context, serviceFunc func(context
 				activeServiceLoadBalancerCancel[string(svc.UID)]()
 				activeService[string(svc.UID)] = false
 				watchedService[string(svc.UID)] = false
+
+				if svc_ret != nil {
+					log.Infof("service [%s/%s] has been modified Annotations[kube-vip.io/ignore]: false", svc_ret.Namespace, svc_ret.Name)
+					sm.updateServiceIgnoreAnnotationAndLabels(false, svc_ret)
+				}
 
 				log.Infof("service [%s/%s] has been deleted", svc.Namespace, svc.Name)
 			}
